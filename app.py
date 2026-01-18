@@ -13,47 +13,46 @@ def extract_tnb_data(pdf_file):
     
     try:
         with pdfplumber.open(pdf_file) as pdf:
-            # We check the first page for the main totals
-            page = pdf.pages[0]
-            text = page.extract_text()
-            if not text:
-                return []
+            # Analyze all pages to ensure we catch the right data
+            for page in pdf.pages:
+                text = page.extract_text()
+                if not text:
+                    continue
+                
+                lines = text.split('\n')
+                current_kwh = 0.0
+                current_rm = 0.0
+                current_date = None
 
-            # 1. EXTRACT DATE: Matches "01.01.2019-31.01.2019" [cite: 19, 113, 213]
-            date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})-\d{2}\.\d{2}\.\d{4}', text)
-            if not date_match:
-                return []
-            
-            raw_date = date_match.group(1)
-            dt_obj = datetime.strptime(raw_date, "%d.%m.%Y")
-            
-            # 2. EXTRACT kWh: Specifically looks for "Kegunaan kWh" in the industrial table [cite: 16, 109, 211, 310]
-            kwh_val = 0.0
-            kwh_match = re.search(r'Kegunaan\s*kWh\s*kWh\s*([\d,]+\.\d{2})', text)
-            if kwh_match:
-                kwh_val = float(kwh_match.group(1).replace(',', ''))
+                for i, line in enumerate(lines):
+                    # 1. EXTRACT DATE: Look for the date pattern DD.MM.YYYY 
+                    if not current_date:
+                        date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', line)
+                        if date_match:
+                            current_date = datetime.strptime(date_match.group(1), "%d.%m.%Y")
 
-            # 3. EXTRACT RM: Targets "Jumlah Bil" or "Jumlah Perlu Bayar" [cite: 6, 9, 103, 106, 201]
-            rm_val = 0.0
-            # Matches "Jumlah Bil RM 521,089.55" or "Jumlah Perlu Bayar RM 521,089.55"
-            rm_match = re.search(r'(?:Jumlah\s*Bil|Jumlah\s*Perlu\s*Bayar)\s*(?::|RM)?\s*RM?\s*([\d,]+\.\d{2})', text, re.IGNORECASE)
-            
-            if rm_match:
-                rm_val = float(rm_match.group(1).replace(',', ''))
-            else:
-                # Fallback for "Caj Semasa" [cite: 9, 32, 110, 210]
-                rm_match_alt = re.search(r'Caj\s*Semasa\s*RM\s*([\d,]+\.\d{2})', text)
-                if rm_match_alt:
-                    rm_val = float(rm_match_alt.group(1).replace(',', ''))
+                    # 2. EXTRACT kWh: Find "Kegunaan kWh" and look at the end of that line [cite: 16, 109]
+                    if "Kegunaan kWh" in line:
+                        nums = re.findall(r'[\d,]+\.\d{2}', line)
+                        if nums:
+                            current_kwh = float(nums[-1].replace(',', ''))
 
-            if kwh_val > 0 or rm_val > 0:
-                data_list.append({
-                    "Year": dt_obj.year,
-                    "Month": dt_obj.strftime("%b"),
-                    "Month_Num": dt_obj.month,
-                    "kWh": kwh_val,
-                    "RM": rm_val
-                })
+                    # 3. EXTRACT RM: Find "Jumlah Perlu Bayar" [cite: 6, 103, 201]
+                    if "Jumlah Perlu Bayar" in line or "Jumlah Bil" in line:
+                        rm_nums = re.findall(r'[\d,]+\.\d{2}', line)
+                        if rm_nums:
+                            current_rm = float(rm_nums[-1].replace(',', ''))
+
+                if current_date and (current_kwh > 0 or current_rm > 0):
+                    data_list.append({
+                        "Year": current_date.year,
+                        "Month": current_date.strftime("%b"),
+                        "Month_Num": current_date.month,
+                        "kWh": current_kwh,
+                        "RM": current_rm
+                    })
+                    # Stop after finding valid data for this bill (to avoid duplicate page data)
+                    break
                     
     except Exception as e:
         st.error(f"Error processing file: {e}")
@@ -62,7 +61,7 @@ def extract_tnb_data(pdf_file):
 
 # --- STREAMLIT UI ---
 st.title("⚡ TNB Industrial Data Extractor")
-st.info("Tailored for Panasonic Automotive Systems (Tarif E2) Bills")
+st.markdown("This version uses **Line-by-Line scanning** for Panasonic Industrial Bills.")
 
 uploaded_files = st.file_uploader("Upload TNB PDFs", type="pdf", accept_multiple_files=True)
 
@@ -74,30 +73,20 @@ if uploaded_files:
             all_data.extend(extracted)
     
     if all_data:
+        # Create DataFrame and remove duplicates
         df = pd.DataFrame(all_data).drop_duplicates(subset=['Year', 'Month'])
         month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         
-        # --- DATA TABLES ---
-        col1, col2 = st.columns(2)
+        # Display Tables
+        st.subheader("Summary Table")
+        final_df = df.sort_values(by=['Year', 'Month_Num'])
+        st.dataframe(final_df[['Year', 'Month', 'kWh', 'RM']], use_container_width=True)
         
-        with col1:
-            st.subheader("Usage (kWh)")
-            kwh_pivot = df.pivot(index='Month', columns='Year', values='kWh').reindex(month_order)
-            st.dataframe(kwh_pivot.style.format("{:,.2f}", na_rep="-"), use_container_width=True)
-        
-        with col2:
-            st.subheader("Cost (RM)")
-            rm_pivot = df.pivot(index='Month', columns='Year', values='RM').reindex(month_order)
-            st.dataframe(rm_pivot.style.format("{:,.2f}", na_rep="-"), use_container_width=True)
-        
-        # --- EXCEL DOWNLOAD ---
+        # Excel Download
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            kwh_pivot.to_excel(writer, sheet_name='kWh_Usage')
-            rm_pivot.to_excel(writer, sheet_name='RM_Cost')
-            # Adding a raw data sheet for better auditing
-            df.sort_values(['Year', 'Month_Num']).to_excel(writer, sheet_name='Raw_Data', index=False)
+            final_df.to_excel(writer, sheet_name='TNB_Data', index=False)
         
-        st.download_button("📥 Download Excel Report", output.getvalue(), "TNB_Consolidated_Report.xlsx")
+        st.download_button("📥 Download Excel File", output.getvalue(), "TNB_Consolidated_Data.xlsx")
     else:
-        st.error("Still no data found. Please ensure the PDF is a digital copy and not a scanned image.")
+        st.error("Still no data. Please verify your PDF is a 'Digital PDF' (you can highlight the text with your mouse).")
