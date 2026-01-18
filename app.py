@@ -4,97 +4,94 @@ import pandas as pd
 import re
 from datetime import datetime
 import io
+import pytesseract
+from pdf2image import convert_from_bytes
 
-st.set_page_config(page_title="TNB Industrial Table Extractor", layout="wide")
+# ==========================================
+# ⚙️ CONFIGURATION - UPDATE THESE PATHS
+# ==========================================
+# 1. Update this to your Tesseract EXE location
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-def extract_tnb_data(pdf_file):
+# 2. Update this to your Poppler BIN folder location
+POPPLER_PATH = r'C:\poppler-24.08.0\Library\bin' 
+# ==========================================
+
+st.set_page_config(page_title="TNB Smart OCR Extractor", layout="wide")
+
+def extract_data_with_ocr(pdf_file):
     data_list = []
     pdf_file.seek(0)
+    file_bytes = pdf_file.read()
     
     try:
-        with pdfplumber.open(pdf_file) as pdf:
-            # Page 1 usually contains the Bill Date and Total Amount
-            first_page = pdf.pages[0]
-            tables = first_page.extract_tables()
-            text = first_page.extract_text()
-
-            # 1. EXTRACT DATE (From Text)
-            # Looks for "01.01.2019-31.01.2019" pattern
-            date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})-\d{2}\.\d{2}\.\d{4}', text)
-            if not date_match:
-                return []
+        # Step A: Try normal digital text extraction
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            text = ""
+            for page in pdf.pages:
+                text += (page.extract_text() or "")
             
-            raw_date = date_match.group(1)
-            dt_obj = datetime.strptime(raw_date, "%d.%m.%Y")
-            
-            current_kwh = 0.0
-            current_rm = 0.0
+        # Step B: If text is missing or unreadable, use the OCR tools you downloaded
+        if "Kegunaan" not in text:
+            st.info("🔄 Scanned PDF detected. Running OCR scan...")
+            images = convert_from_bytes(file_bytes, poppler_path=POPPLER_PATH, first_page=1, last_page=1)
+            if images:
+                text = pytesseract.image_to_string(images[0])
+        
+        # Step C: Parse the data found in your Panasonic bills
+        # 1. Date (e.g., 01.01.2019) [cite: 19, 113, 213]
+        date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', text)
+        if not date_match: return []
+        dt_obj = datetime.strptime(date_match.group(1), "%d.%m.%Y")
+        
+        # 2. kWh Usage (e.g., 1,360,581.00) 
+        kwh_val = 0.0
+        kwh_match = re.search(r'Kegunaan\s*kWh.*?([\d,]+\.\d{2})', text, re.DOTALL)
+        if kwh_match:
+            kwh_val = float(kwh_match.group(1).replace(',', ''))
 
-            # 2. EXTRACT FROM TABLES
-            # We iterate through all tables found on the page
-            for table in tables:
-                for row in table:
-                    # Clean the row (remove None and extra spaces)
-                    clean_row = [str(cell).replace('\n', ' ').strip() for cell in row if cell]
-                    row_str = " ".join(clean_row)
+        # 3. Total RM Cost (e.g., 521,089.55) [cite: 6, 9, 32, 103, 106, 127]
+        rm_val = 0.0
+        rm_match = re.search(r'(?:Jumlah\s*Perlu\s*Bayar|Jumlah\s*Bil|Caj\s*Semasa)\s*RM\s*([\d,]+\.\d{2})', text, re.IGNORECASE)
+        if rm_match:
+            rm_val = float(rm_match.group(1).replace(',', ''))
 
-                    # Target: Kegunaan kWh (Usage)
-                    if "Kegunaan kWh" in row_str:
-                        # Extract the numbers from this specific row
-                        nums = re.findall(r'[\d,]+\.\d{2}', row_str)
-                        if nums:
-                            current_kwh = float(nums[-1].replace(',', ''))
-
-                    # Target: Caj Semasa or Jumlah Bil (Cost)
-                    if "Caj Semasa" in row_str or "Jumlah Bil" in row_str:
-                        rm_nums = re.findall(r'[\d,]+\.\d{2}', row_str)
-                        if rm_nums:
-                            current_rm = float(rm_nums[-1].replace(',', ''))
-
-            # Fallback if Table extraction missed RM but it exists in text
-            if current_rm == 0:
-                rm_match = re.search(r'Jumlah\s*Perlu\s*Bayar\s*RM\s*([\d,]+\.\d{2})', text)
-                if rm_match:
-                    current_rm = float(rm_match.group(1).replace(',', ''))
-
-            if current_kwh > 0 or current_rm > 0:
-                data_list.append({
-                    "Year": dt_obj.year,
-                    "Month": dt_obj.strftime("%b"),
-                    "Month_Num": dt_obj.month,
-                    "kWh": current_kwh,
-                    "RM": current_rm
-                })
+        if kwh_val > 0 or rm_val > 0:
+            data_list.append({
+                "Year": dt_obj.year,
+                "Month": dt_obj.strftime("%b"),
+                "Month_Num": dt_obj.month,
+                "kWh": kwh_val,
+                "RM": rm_val
+            })
                     
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(f"⚠️ OCR Error: {e}. Please check your Tesseract and Poppler paths.")
                 
     return data_list
 
-# --- STREAMLIT UI ---
-st.title("⚡ TNB Industrial Table Extractor")
-st.markdown("This version extracts data directly from the **PDF Tables** for higher accuracy.")
+# --- UI ---
+st.title("⚡ TNB Industrial Smart Extractor")
+st.markdown("Upload your Panasonic Automotive Systems PDFs (Scanned or Digital).")
 
 uploaded_files = st.file_uploader("Upload TNB PDFs", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
-    all_results = []
+    all_data = []
     for f in uploaded_files:
-        data = extract_tnb_data(f)
-        if data:
-            all_results.extend(data)
+        extracted = extract_data_with_ocr(f)
+        if extracted:
+            all_data.extend(extracted)
     
-    if all_results:
-        df = pd.DataFrame(all_results).drop_duplicates(subset=['Year', 'Month'])
-        df = df.sort_values(['Year', 'Month_Num'])
+    if all_data:
+        df = pd.DataFrame(all_data).drop_duplicates(subset=['Year', 'Month']).sort_values(['Year', 'Month_Num'])
+        st.subheader("📊 Extracted Summary")
+        st.table(df[['Year', 'Month', 'kWh', 'RM']].style.format({'kWh': "{:,.2f}", 'RM': "{:,.2f}"}))
         
-        st.subheader("Extracted Data")
-        st.dataframe(df[['Year', 'Month', 'kWh', 'RM']], use_container_width=True)
-        
+        # Excel Export
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='TNB_Summary')
-        
-        st.download_button("📥 Save to Excel", output.getvalue(), "TNB_Data_Export.xlsx")
+            df.to_excel(writer, index=False, sheet_name='TNB_Analytics')
+        st.download_button("📥 Download Excel Report", output.getvalue(), "TNB_Consolidated_Report.xlsx")
     else:
-        st.error("Still no data. This suggests the PDF might be an 'Image PDF' or has a custom font encoding that blocks extraction.")
+        st.warning("No data found. Check if the PDF is clearly readable.")
