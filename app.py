@@ -5,12 +5,10 @@ import re
 from datetime import datetime
 import io
 
-st.set_page_config(page_title="TNB Analytics Dashboard", layout="wide")
+st.set_page_config(page_title="TNB Industrial Analytics", layout="wide")
 
 def extract_tnb_data(pdf_file):
     data_list = []
-    
-    # Reset file pointer to the beginning to prevent PdfminerException
     pdf_file.seek(0)
     
     try:
@@ -20,29 +18,30 @@ def extract_tnb_data(pdf_file):
                 if not text:
                     continue
 
-                # 1. EXTRACT MONTH & YEAR
-                # Targets 'Tempoh Bill' inside the blue box area
-                date_match = re.search(r'Tempoh\s*Bill\s*:\s*(\d{2}\.\d{2}\.\d{4})', text)
+                # 1. EXTRACT DATE (Looking for DD.MM.YYYY-DD.MM.YYYY format)
+                # This matches the 'Tempoh Bill' range found in your document
+                date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})-\d{2}\.\d{2}\.\d{4}', text)
                 if not date_match:
                     continue
                 
                 raw_date = date_match.group(1)
                 dt_obj = datetime.strptime(raw_date, "%d.%m.%Y")
                 
-                # 2. EXTRACT kWh (Last column of 'Kegunaan kWh' row)
+                # 2. EXTRACT kWh (Targeting the 'Kegunaan kWh' row specific to your layout)
                 kwh_val = 0.0
-                lines = text.split('\n')
-                for line in lines:
-                    if "Kegunaan kWh" in line:
-                        # Extract all decimal numbers; the last one is the 'Jumlah'
-                        nums = re.findall(r'[\d,]+\.\d{2}', line)
-                        if nums:
-                            kwh_val = float(nums[-1].replace(',', ''))
+                # Finds 'Kegunaan kWh', skips the 'kWh' unit, and grabs the total number
+                kwh_match = re.search(r'Kegunaan\s*kWh\s*kWh\s*([\d,]+\.\d{2})', text)
+                if kwh_match:
+                    kwh_val = float(kwh_match.group(1).replace(',', ''))
 
-                # 3. EXTRACT RM (Figure beside 'Caj Semasa')
-                # Look for 'Caj Semasa' followed by RM and the amount
+                # 3. EXTRACT RM (Targeting 'Jumlah Bil' or 'Caj Semasa')
                 rm_val = 0.0
-                rm_match = re.search(r'Caj\s*Semasa\s*(?::|RM)?\s*RM?\s*([\d,]+\.\d{2})', text, re.IGNORECASE)
+                # Looks for 'Jumlah Bil' followed by RM and the amount
+                rm_match = re.search(r'Jumlah\s*Bil\s*RM\s*([\d,]+\.\d{2})', text)
+                if not rm_match:
+                    # Fallback to 'Caj Semasa' if 'Jumlah Bil' isn't found
+                    rm_match = re.search(r'Caj\s*Semasa\s*RM\s*([\d,]+\.\d{2})', text)
+                
                 if rm_match:
                     rm_val = float(rm_match.group(1).replace(',', ''))
 
@@ -54,14 +53,15 @@ def extract_tnb_data(pdf_file):
                         "kWh": kwh_val,
                         "RM": rm_val
                     })
+                    
     except Exception as e:
         st.error(f"Error processing file: {e}")
                 
     return data_list
 
 # --- STREAMLIT UI ---
-st.title("⚡ TNB Multi-Year Data Extractor")
-st.markdown("Upload your monthly bills to generate comparison tables for **Usage (kWh)** and **Cost (RM)**.")
+st.title("⚡ TNB Industrial Data Extractor")
+st.markdown("Upload your **Tarif E2** bills to generate comparison tables.")
 
 uploaded_files = st.file_uploader("Upload TNB PDFs", type="pdf", accept_multiple_files=True)
 
@@ -74,15 +74,15 @@ if uploaded_files:
     
     if all_data:
         df = pd.DataFrame(all_data).drop_duplicates(subset=['Year', 'Month'])
-        month_order = ["Jan", "Feb", "Mar", "Apr", "May", "June", "July", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         
         # --- TABLE 1: kWh ---
-        st.subheader("Summary Comparison Electricity Usage (kWh)")
+        st.subheader("Electricity Usage (kWh) Comparison")
         kwh_pivot = df.pivot(index='Month', columns='Year', values='kWh').reindex(month_order)
         st.dataframe(kwh_pivot.style.format("{:,.2f} kWh", na_rep="-"), use_container_width=True)
         
         # --- TABLE 2: RM ---
-        st.subheader("Summary Comparison Electricity Cost (RM)")
+        st.subheader("Electricity Cost (RM) Comparison")
         rm_pivot = df.pivot(index='Month', columns='Year', values='RM').reindex(month_order)
         st.dataframe(rm_pivot.style.format("RM {:,.2f}", na_rep="-"), use_container_width=True)
         
@@ -92,6 +92,6 @@ if uploaded_files:
             kwh_pivot.to_excel(writer, sheet_name='kWh_Usage')
             rm_pivot.to_excel(writer, sheet_name='RM_Cost')
         
-        st.download_button("📥 Download Excel Report", output.getvalue(), "TNB_Summary.xlsx")
+        st.download_button("📥 Download Excel Report", output.getvalue(), "TNB_Industrial_Summary.xlsx")
     else:
         st.warning("No data found. Please ensure the PDFs are digital text-based bills.")
