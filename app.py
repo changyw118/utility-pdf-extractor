@@ -32,19 +32,30 @@ def extract_data_with_ocr(pdf_file):
             text = pytesseract.image_to_string(image, lang="eng")
             
             # --- Parsing Logic ---
-            date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', text)
+            # --- IMPROVED Parsing Logic ---
+            
+            # 1. Date: Allow for slightly different separators (dots, dashes, or slashes)
+            date_match = re.search(r'(\d{2}[./-]\d{2}[./-]\d{4})', text)
             if not date_match:
                 continue
-                
-            dt_obj = datetime.strptime(date_match.group(1), "%d.%m.%Y")
             
+            # Normalize the date string to use dots for strptime
+            date_str = date_match.group(1).replace('-', '.').replace('/', '.')
+            dt_obj = datetime.strptime(date_str, "%d.%m.%Y")
+            
+            # 2. kWh Usage: Look for 'kWh' or 'kVVh' or 'KWH'
+            # We look for the number AFTER the keyword, ignoring extra symbols
             kwh_val = 0.0
-            kwh_match = re.search(r'Kegunaan\s*kWh.*?([\d,]+\.\d{2})', text, re.DOTALL)
+            kwh_pattern = r'(?:Kegunaan|Usage)\s*(?:kWh|kVVh|KWH).*?([\d,]+\.\d{2})'
+            kwh_match = re.search(kwh_pattern, text, re.IGNORECASE | re.DOTALL)
             if kwh_match:
                 kwh_val = float(kwh_match.group(1).replace(',', ''))
 
+            # 3. Total RM Cost: Look for 'RM' or 'RN' or 'BM'
+            # TNB bills sometimes have "Jumlah Bil" or "Caj Semasa"
             rm_val = 0.0
-            rm_match = re.search(r'(?:Jumlah\s*Perlu\s*Bayar|Jumlah\s*Bil|Caj\s*Semasa)\s*RM\s*([\d,]+\.\d{2})', text, re.IGNORECASE)
+            rm_pattern = r'(?:Jumlah|Caj|Total).*?(?:RM|RN|BM|RIV|RM)\s*([\d,]+\.\d{2})'
+            rm_match = re.search(rm_pattern, text, re.IGNORECASE)
             if rm_match:
                 rm_val = float(rm_match.group(1).replace(',', ''))
 
