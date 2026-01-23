@@ -40,11 +40,20 @@ def extract_data_with_ocr(pdf_file):
             dt_obj = datetime.strptime(date_str, "%d.%m.%Y")
             
             # --- 2. SMART kWh SEARCH ---
-            # Handles 'kVVh', 'KWH', etc., and looks across lines
+            # --- UPDATED LASER-FOCUSED kWh SEARCH ---
             kwh_val = 0.0
-            kwh_pattern = r'Kegunaan.*?kWh.*?\s+([\d,]+\.\d{2})'
+            
+            # This 'pattern' looks specifically for the word 'Kegunaan' (Usage)
+            # It handles common OCR typos like 'kVVh' or 'KWt'
+            # The '[\d,]+\.\d{2}' part ensures it only grabs a number with 2 decimal places
+            kwh_pattern = r'(?:Kegunaan|Usage).*?(?:kWh|kVVh|KWH|KWt|kwh).*?\s+([\d,]+\.\d{2})'
+            
+            # re.IGNORECASE makes it work for 'kwh' or 'KWH'
+            # re.DOTALL allows the number to be on the line below the word 'Kegunaan'
             kwh_match = re.search(kwh_pattern, text, re.IGNORECASE | re.DOTALL)
+            
             if kwh_match:
+                # We remove the comma so Python can treat it as a number (e.g., 1,200.50 -> 1200.50)
                 kwh_val = float(kwh_match.group(1).replace(',', ''))
 
             # --- 3. SMART RM SEARCH ---
