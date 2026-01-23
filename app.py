@@ -30,7 +30,7 @@ def extract_data_with_ocr(pdf_file):
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
         
-        # 200 DPI for high precision to avoid missing faint text.
+        # 200 DPI for high precision.
         images = convert_from_bytes(file_bytes, dpi=200, grayscale=True) 
         total_pages = len(images)
         
@@ -39,45 +39,45 @@ def extract_data_with_ocr(pdf_file):
         for i, image in enumerate(images):
             my_bar.progress(int(((i + 1) / total_pages) * 100))
             
-            # PSM 6 is vital for keeping horizontal data rows aligned.
+            # PSM 6 keeps the layout structured.
             text = pytesseract.image_to_string(image, lang="eng", config='--psm 6')
             
-            # --- 1. TWO-TIER DATE SEARCH ---
+            # --- 1. STRICT POSITIONAL DATE SEARCH ---
             dt_obj = None
-            # Tier 1: Strict search for 'Tempoh Bil' to get 01.01.2020.
-            date_section = re.search(r'Tempoh\s*Bil.*?:?\s*(\d{2}[./-]\d{2}[./-]\d{4})', text, re.IGNORECASE | re.DOTALL)
+            # We look specifically for the line starting with 'Tempoh Bil' 
+            # and grab the FIRST date (e.g., 01.01.2020).
+            tempoh_line = re.search(r'Tempoh\s*Bil.*?:?\s*(\d{2}[./-]\d{2}[./-]\d{4})', text, re.IGNORECASE)
             
-            if date_section:
-                raw_date = date_section.group(1).replace('-', '.').replace('/', '.')
+            if tempoh_line:
+                raw_date = tempoh_line.group(1).replace('-', '.').replace('/', '.')
             else:
-                # Tier 2: Broad search for ANY date if 'Tempoh Bil' is blurry.
-                any_date = re.search(r'(\d{2}[./-]\d{2}[./-]\d{4})', text)
-                raw_date = any_date.group(1).replace('-', '.').replace('/', '.') if any_date else None
+                # Tier 2: Only if 'Tempoh Bil' is not found, look for dates between 
+                # 'Tarikh Bil' and 'No. Invois'.
+                section = re.search(r'Tarikh\s*Bil(.*?)No\.\s*Invois', text, re.IGNORECASE | re.DOTALL)
+                if section:
+                    dates = re.findall(r'(\d{2}[./-]\d{2}[./-]\d{4})', section.group(1))
+                    # Usually the second date in this box is the Start Date.
+                    raw_date = dates[1].replace('-', '.').replace('/', '.') if len(dates) > 1 else None
+                else:
+                    raw_date = None
             
             if raw_date:
-                # Correction for common OCR typos.
+                # OCR typo correction.
                 if raw_date[:2].startswith('9'): raw_date = '3' + raw_date[1:] 
                 try:
                     dt_obj = datetime.strptime(raw_date, "%d.%m.%Y")
                 except: pass
 
             if dt_obj and 2010 <= dt_obj.year <= 2030:
-                # --- 2. TWO-TIER kWh SEARCH ---
-                # Tier 1: Look for "Kegunaan kWh".
+                # --- 2. LARGE kWh EXTRACTION (Million Fix) ---
+                # Anchored to 'Kegunaan kWh'.
                 kwh_match = re.search(r'Kegunaan\s*(?:kWh|KWH|kVVh).*?([\d\s,.]+\d{2})', text, re.IGNORECASE | re.DOTALL)
-                
-                # Tier 2: If keyword is missing, look for a large number near "kWh" unit.
-                if not kwh_match:
-                    kwh_match = re.search(r'([\d\s,.]+\d{2})\s*(?:kWh|KWH|kVVh)', text, re.IGNORECASE)
-                
                 kwh_val = clean_industrial_num(kwh_match.group(1)) if kwh_match else 0.0
 
-                # --- 3. TWO-TIER RM SEARCH ---
-                # Tier 1: "Jumlah Perlu Bayar".
+                # --- 3. RM EXTRACTION ---
+                # Anchored to 'Jumlah Perlu Bayar'.
                 rm_match = re.search(r'Jumlah\s*Perlu\s*Bayar.*?([\d\s,.]+\d{2})', text, re.IGNORECASE | re.DOTALL)
-                
                 if not rm_match:
-                    # Tier 2: Last large RM value on the page.
                     backup = list(re.finditer(r'(?:Jumlah|Total|Caj).*?([\d\s,.]+\d{2})', text, re.IGNORECASE | re.DOTALL))
                     rm_val = clean_industrial_num(backup[-1].group(1)) if backup else 0.0
                 else:
@@ -92,7 +92,6 @@ def extract_data_with_ocr(pdf_file):
                         "RM": rm_val
                     })
             
-            # --- MEMORY CLEANING FOR LARGE FILES ---
             image.close() 
             del image
             gc.collect() 
@@ -103,7 +102,7 @@ def extract_data_with_ocr(pdf_file):
     return data_list
 
 # --- UI ---
-st.title("⚡ TNB Universal Smart Extractor")
+st.title("⚡ TNB Industrial Smart Extractor")
 uploaded_files = st.file_uploader("Upload TNB PDFs", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
@@ -115,7 +114,6 @@ if uploaded_files:
     if all_results:
         df = pd.DataFrame(all_results).drop_duplicates(subset=['Year', 'Month']).sort_values(['Year', 'Month_Num'])
         st.subheader("📊 Extracted Summary")
-        # Display with commas for readability.
         st.table(df[['Year', 'Month', 'kWh', 'RM']].style.format({'kWh': "{:,.2f}", 'RM': "{:,.2f}"}))
         
         output = io.BytesIO()
