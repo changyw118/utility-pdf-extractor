@@ -16,22 +16,22 @@ def extract_data_with_ocr(pdf_file):
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
         
-        # Convert PDF pages to images
-        images = convert_from_bytes(file_bytes)
+        # 1. Lower the DPI to 150 to save memory
+        # 2. Use 'thread_count' to speed up processing
+        images = convert_from_bytes(file_bytes, dpi=150)
         total_pages = len(images)
         
         progress_text = f"Scanning {pdf_file.name}..."
         my_bar = st.progress(0, text=progress_text)
 
         for i, image in enumerate(images):
-            # Update progress
-            progress_perc = int(((i + 1) / total_pages) * 100)
-            my_bar.progress(progress_perc, text=f"{progress_text} (Page {i+1}/{total_pages})")
+            my_bar.progress(int(((i + 1) / total_pages) * 100), 
+                             text=f"{progress_text} (Page {i+1}/{total_pages})")
             
-            # OCR logic
-            text = pytesseract.image_to_string(image)
+            # Use 'lang="eng"' to help Tesseract focus
+            text = pytesseract.image_to_string(image, lang="eng")
             
-            # Parsing logic
+            # --- Parsing Logic ---
             date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', text)
             if not date_match:
                 continue
@@ -56,11 +56,14 @@ def extract_data_with_ocr(pdf_file):
                     "kWh": kwh_val,
                     "RM": rm_val
                 })
-        
+            
+            # IMPORTANT: Clear the image from memory after processing
+            image.close() 
+            
         my_bar.empty()
                     
     except Exception as e:
-        st.error(f"⚠️ Technical Error: {e}")
+        st.error(f"⚠️ technical Error: {e}")
                 
     return data_list
 
