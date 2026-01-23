@@ -12,6 +12,7 @@ st.set_page_config(page_title="TNB Universal Extractor", layout="wide")
 def clean_industrial_num(raw_str):
     """Collapses spaces and commas to prevent digit loss in large numbers."""
     if not raw_str: return 0.0
+    # Remove everything except digits and the decimal point
     clean = "".join(c for c in raw_str if c.isdigit() or c == '.')
     try:
         return float(clean)
@@ -24,8 +25,7 @@ def extract_data_with_ocr(pdf_file):
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
         
-        # WE USE GRAYSCALE AND LOWER DPI (150) FOR BIG FILES
-        # This reduces the size of each page in the RAM significantly.
+        # GRAYSCALE and 150 DPI significantly reduce RAM usage for large files.
         images = convert_from_bytes(file_bytes, dpi=150, grayscale=True) 
         total_pages = len(images)
         
@@ -34,10 +34,12 @@ def extract_data_with_ocr(pdf_file):
         for i, image in enumerate(images):
             my_bar.progress(int(((i + 1) / total_pages) * 100))
             
-            # Use PSM 6 for horizontal alignment of industrial tables
+            # PSM 6 maintains horizontal alignment for industrial data rows.
             text = pytesseract.image_to_string(image, lang="eng", config='--psm 6')
             
-            # --- 1. STRICT DATE (Tempoh Bil) ---
+            # --- 1. FLEXIBLE DATE SEARCH (Tempoh Bil) ---
+            dt_obj = None
+            # Targets the usage end-date (e.g., 31.12.2021).
             tempoh_pattern = r'Tempoh\s*Bil.*?[\d./-]+\s*-\s*(\d{2}[./-]\d{2}[./-]\d{4})'
             date_match = re.search(tempoh_pattern, text, re.IGNORECASE | re.DOTALL)
             
@@ -45,15 +47,28 @@ def extract_data_with_ocr(pdf_file):
                 date_match = re.search(r'(\d{2}[./-]\d{2}[./-]\d{4})', text)
             
             if date_match:
-                date_str = date_match.group(1).replace('-', '.').replace('/', '.')
-                dt_obj = datetime.strptime(date_str, "%d.%m.%Y")
+                raw_date = date_match.group(1).replace('-', '.').replace('/', '.')
                 
-                # --- 2. STRICT kWh (Large Number Fix) ---
+                # FIX: Corrects common OCR typos (e.g., '90' instead of '30').
+                day_part = raw_date[:2]
+                if day_part.startswith('9'): 
+                    raw_date = '3' + raw_date[1:] 
+                
+                try:
+                    dt_obj = datetime.strptime(raw_date, "%d.%m.%Y")
+                except ValueError:
+                    # Skips messy dates instead of crashing the entire app.
+                    st.warning(f"⚠️ Page {i+1}: Could not read date '{raw_date}'. Skipping...")
+                    continue 
+
+                # --- 2. STRICT kWh SEARCH (Large Number Fix) ---
+                # Anchored to kWh to ignore "Kegunaan RM".
                 kwh_pattern = r'Kegunaan\s*(?:kWh|KWH|kVVh).*?([\d\s,]+\.\d{2})'
                 kwh_match = re.search(kwh_pattern, text, re.IGNORECASE | re.DOTALL)
                 kwh_val = clean_industrial_num(kwh_match.group(1)) if kwh_match else 0.0
 
-                # --- 3. STRICT RM (Final Total) ---
+                # --- 3. STRICT RM SEARCH (Final Total) ---
+                # Picks the last 'Jumlah' on the page to find the final payable amount.
                 rm_pattern = r'(?:Jumlah|Caj|Total).*?(?:Perlu|Bayar|Bil|Semasa).*?(?:RM|RN|BM)?\s*([\d\s,]+\.\d{2})'
                 rm_matches = list(re.finditer(rm_pattern, text, re.IGNORECASE | re.DOTALL))
                 rm_val = clean_industrial_num(rm_matches[-1].group(1)) if rm_matches else 0.0
@@ -67,10 +82,10 @@ def extract_data_with_ocr(pdf_file):
                         "RM": rm_val
                     })
             
-            # --- AGGRESSIVE MEMORY CLEANING ---
+            # AGGRESSIVE MEMORY CLEANING for large files.
             image.close() 
             del image
-            gc.collect() # Force Python to clear the RAM after every page
+            gc.collect() 
             
         my_bar.empty()
     except Exception as e:
@@ -85,13 +100,16 @@ if uploaded_files:
     all_results = []
     for f in uploaded_files:
         data = extract_data_with_ocr(f)
-        if data: all_results.extend(data)
+        if data:
+            all_results.extend(data)
     
     if all_results:
+        # Organize data and remove potential duplicates across multi-page files.
         df = pd.DataFrame(all_results).drop_duplicates(subset=['Year', 'Month']).sort_values(['Year', 'Month_Num'])
         st.subheader("📊 Extracted Summary")
         st.table(df[['Year', 'Month', 'kWh', 'RM']].style.format({'kWh': "{:,.2f}", 'RM': "{:,.2f}"}))
         
+        # Excel Export logic.
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
