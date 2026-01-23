@@ -48,14 +48,23 @@ def extract_data_with_ocr(pdf_file):
                 kwh_val = float(kwh_match.group(1).replace(',', ''))
 
             # --- 3. SMART RM SEARCH ---
-            # Look specifically for RM/RN followed by the digit
+           # --- UPDATED STRICT RM SEARCH ---
             rm_val = 0.0
-            # This regex allows for a space or a character between RM and the number
-            rm_pattern = r'(?:Jumlah|Caj|Bil).*?(?:RM|RN|BM|RN|RIV)\s*([\d,]+\.\d{2})'
+            
+            # This 'list' focuses ONLY on the Final Total keywords
+            # It ignores things like "Balance" or "Deposit"
+            strict_rm_keywords = r'(?:Jumlah\s*Perlu\s*Bayar|Jumlah\s*Bil|Caj\s*Semasa)'
+            
+            # This pattern looks for the keyword, then the RM symbol, then the number
+            rm_pattern = f'{strict_rm_keywords}.*?(?:RM|RN|BM|RIV)?\s*([\d,]+\.\d{2})'
+            
+            # We use re.DOTALL in case the number is on the line below the word "RM"
             rm_match = re.search(rm_pattern, text, re.IGNORECASE | re.DOTALL)
+            
             if rm_match:
+                # We clean the number (removing commas) so Python treats it as a decimal
                 rm_val = float(rm_match.group(1).replace(',', ''))
-
+                
             if kwh_val > 0 or rm_val > 0:
                 data_list.append({
                     "Year": dt_obj.year,
