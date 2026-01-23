@@ -23,51 +23,51 @@ def extract_data_with_ocr(pdf_file):
     file_bytes = pdf_file.read()
     
     try:
-        # Step A: Try normal digital text extraction
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            text = ""
-            for page in pdf.pages:
-                text += (page.extract_text() or "")
+        # Step A: Convert ALL pages to images for OCR
+        # Removing first_page and last_page makes it process the whole document
+        st.info("🔄 Processing all pages... please wait.")
+        images = convert_from_bytes(file_bytes) 
+        
+        # Step B: Loop through every single page
+        for i, image in enumerate(images):
+            text = pytesseract.image_to_string(image)
             
-        # Step B: If text is missing or unreadable, use the OCR tools you downloaded
-        if "Kegunaan" not in text:
-            st.info("🔄 Scanned PDF detected. Running OCR scan...")
-            images = convert_from_bytes(file_bytes, first_page=1, last_page=1)
-            if images:
-                text = pytesseract.image_to_string(images[0])
-        
-        # Step C: Parse the data found in your Panasonic bills
-        # 1. Date (e.g., 01.01.2019) [cite: 19, 113, 213]
-        date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', text)
-        if not date_match: return []
-        dt_obj = datetime.strptime(date_match.group(1), "%d.%m.%Y")
-        
-        # 2. kWh Usage (e.g., 1,360,581.00) 
-        kwh_val = 0.0
-        kwh_match = re.search(r'Kegunaan\s*kWh.*?([\d,]+\.\d{2})', text, re.DOTALL)
-        if kwh_match:
-            kwh_val = float(kwh_match.group(1).replace(',', ''))
+            # Step C: Parse the data for THIS specific page
+            # 1. Date
+            date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', text)
+            if not date_match:
+                continue # Skip this page if no date is found
+                
+            dt_obj = datetime.strptime(date_match.group(1), "%d.%m.%Y")
+            
+            # 2. kWh Usage
+            kwh_val = 0.0
+            kwh_match = re.search(r'Kegunaan\s*kWh.*?([\d,]+\.\d{2})', text, re.DOTALL)
+            if kwh_match:
+                kwh_val = float(kwh_match.group(1).replace(',', ''))
 
-        # 3. Total RM Cost (e.g., 521,089.55) [cite: 6, 9, 32, 103, 106, 127]
-        rm_val = 0.0
-        rm_match = re.search(r'(?:Jumlah\s*Perlu\s*Bayar|Jumlah\s*Bil|Caj\s*Semasa)\s*RM\s*([\d,]+\.\d{2})', text, re.IGNORECASE)
-        if rm_match:
-            rm_val = float(rm_match.group(1).replace(',', ''))
+            # 3. Total RM Cost
+            rm_val = 0.0
+            rm_match = re.search(r'(?:Jumlah\s*Perlu\s*Bayar|Jumlah\s*Bil|Caj\s*Semasa)\s*RM\s*([\d,]+\.\d{2})', text, re.IGNORECASE)
+            if rm_match:
+                rm_val = float(rm_match.group(1).replace(',', ''))
 
-        if kwh_val > 0 or rm_val > 0:
-            data_list.append({
-                "Year": dt_obj.year,
-                "Month": dt_obj.strftime("%b"),
-                "Month_Num": dt_obj.month,
-                "kWh": kwh_val,
-                "RM": rm_val
-            })
+            # Only add to list if we found actual values on this page
+            if kwh_val > 0 or rm_val > 0:
+                data_list.append({
+                    "Year": dt_obj.year,
+                    "Month": dt_obj.strftime("%b"),
+                    "Month_Num": dt_obj.month,
+                    "kWh": kwh_val,
+                    "RM": rm_val,
+                    "Page": i + 1  # Optional: keeps track of which page it came from
+                })
                     
     except Exception as e:
-        st.error(f"⚠️ OCR Error: {e}. Please check your Tesseract and Poppler paths.")
+        st.error(f"⚠️ OCR Error: {e}. Ensure packages.txt is present.")
                 
     return data_list
-
+    
 # --- UI ---
 st.title("⚡ TNB Industrial Smart Extractor")
 st.markdown("Upload your Panasonic Automotive Systems PDFs (Scanned or Digital).")
