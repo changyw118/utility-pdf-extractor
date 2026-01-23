@@ -1,5 +1,7 @@
-pdf2image
-pytesseract
+streamlit
 pdfplumber
 pandas
+pytesseract
+pdf2image
+pillow
 openpyxl
