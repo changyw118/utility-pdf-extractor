@@ -7,7 +7,7 @@ import pytesseract
 from pdf2image import convert_from_bytes
 
 # --- Page Config ---
-st.set_page_config(page_title="TNB Industrial Smart Extractor", layout="wide")
+st.set_page_config(page_title="TNB Industrial Extractor", layout="wide")
 
 def extract_data_with_ocr(pdf_file):
     data_list = []
@@ -15,17 +15,17 @@ def extract_data_with_ocr(pdf_file):
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
         
-        # 200 DPI is the "Sweet Spot" for industrial digits
-        images = convert_from_bytes(file_bytes, dpi=200) 
+        # Lowering DPI to 150 for the initial "Safe Run"
+        images = convert_from_bytes(file_bytes, dpi=150) 
         total_pages = len(images)
         
-        my_bar = st.progress(0, text=f"Processing {pdf_file.name}...")
+        my_bar = st.progress(0)
 
         for i, image in enumerate(images):
             my_bar.progress(int(((i + 1) / total_pages) * 100))
             
-            # PSM 6 helps keep large numbers on one line
-            text = pytesseract.image_to_string(image, lang="eng", config='--psm 6')
+            # Using basic config to ensure no startup errors
+            text = pytesseract.image_to_string(image, lang="eng")
             
             # --- 1. DATE SEARCH (Tempoh Bil) ---
             tempoh_pattern = r'Tempoh\s*Bil.*?[\d./-]+\s*-\s*(\d{2}[./-]\d{2}[./-]\d{4})'
@@ -40,12 +40,12 @@ def extract_data_with_ocr(pdf_file):
                 
                 # --- 2. kWh EXTRACTION (Large Number Fix) ---
                 kwh_val = 0.0
-                kwh_line_pattern = r'Kegunaan\s*(?:kWh|kVVh|KWH).*?([\d\s,]+\.\d{2})'
+                kwh_line_pattern = r'Kegunaan\s*(?:kWh|KWH).*?([\d\s,]+\.\d{2})'
                 kwh_match = re.search(kwh_line_pattern, text, re.IGNORECASE | re.DOTALL)
                 
                 if kwh_match:
                     raw_val = kwh_match.group(1)
-                    clean_val = "".join(filter(lambda x: x.isdigit() or x == '.', raw_val))
+                    clean_val = "".join(c for c in raw_val if c.isdigit() or c == '.')
                     if clean_val:
                         kwh_val = float(clean_val)
 
@@ -56,7 +56,7 @@ def extract_data_with_ocr(pdf_file):
                 
                 if rm_matches:
                     raw_rm = rm_matches[-1].group(1)
-                    clean_rm = "".join(filter(lambda x: x.isdigit() or x == '.', raw_rm))
+                    clean_rm = "".join(c for c in raw_rm if c.isdigit() or c == '.')
                     if clean_rm:
                         rm_val = float(clean_rm)
 
@@ -70,11 +70,10 @@ def extract_data_with_ocr(pdf_file):
                     })
             
             image.close()
-            del image 
             
         my_bar.empty()
     except Exception as e:
-        st.error(f"⚠️ Extraction Error: {e}")
+        st.error(f"Error: {e}")
     return data_list
 
 # --- User Interface ---
@@ -82,18 +81,18 @@ st.title("⚡ TNB Industrial Smart Extractor")
 uploaded_files = st.file_uploader("Upload TNB PDFs", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
-    all_data = []
+    all_results = []
     for f in uploaded_files:
-        extracted = extract_data_with_ocr(f)
-        if extracted:
-            all_data.extend(extracted)
+        data = extract_data_with_ocr(f)
+        if data:
+            all_results.extend(data)
     
-    if all_data:
-        df = pd.DataFrame(all_data).drop_duplicates(subset=['Year', 'Month']).sort_values(['Year', 'Month_Num'])
-        st.subheader("📊 Extracted Summary")
+    if all_results:
+        df = pd.DataFrame(all_results).drop_duplicates(subset=['Year', 'Month']).sort_values(['Year', 'Month_Num'])
         st.table(df[['Year', 'Month', 'kWh', 'RM']].style.format({'kWh': "{:,.2f}", 'RM': "{:,.2f}"}))
         
+        # Excel Export
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='TNB_Data')
-        st.download_button("📥 Download Excel Report", output.getvalue(), "TNB_Report.xlsx")
+            df.to_excel(writer, index=False)
+        st.download_button("📥 Download Excel", output.getvalue(), "TNB_Report.xlsx")
