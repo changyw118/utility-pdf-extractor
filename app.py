@@ -3,6 +3,7 @@ import pandas as pd
 import re
 from datetime import datetime
 import io
+import gc  # Garbage collector for memory management
 import pytesseract
 from pdf2image import convert_from_bytes
 
@@ -23,9 +24,9 @@ def extract_data_with_ocr(pdf_file):
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
         
-        # 1. Process as a generator to save memory
-        # 200 DPI ensures accuracy for small digits
-        images = convert_from_bytes(file_bytes, dpi=200) 
+        # WE USE GRAYSCALE AND LOWER DPI (150) FOR BIG FILES
+        # This reduces the size of each page in the RAM significantly.
+        images = convert_from_bytes(file_bytes, dpi=150, grayscale=True) 
         total_pages = len(images)
         
         my_bar = st.progress(0, text=f"Processing {pdf_file.name}...")
@@ -66,13 +67,14 @@ def extract_data_with_ocr(pdf_file):
                         "RM": rm_val
                     })
             
-            # --- CRITICAL: CLEAR RAM ---
-            image.close() # Removes the current page from memory
+            # --- AGGRESSIVE MEMORY CLEANING ---
+            image.close() 
             del image
+            gc.collect() # Force Python to clear the RAM after every page
             
         my_bar.empty()
     except Exception as e:
-        st.error(f"⚠️ Memory or System Error: {e}")
+        st.error(f"⚠️ App Error: {e}")
     return data_list
 
 # --- UI ---
