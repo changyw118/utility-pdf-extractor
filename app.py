@@ -16,46 +16,43 @@ def extract_data_with_ocr(pdf_file):
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
         
-        # 1. Lower the DPI to 150 to save memory
-        # 2. Use 'thread_count' to speed up processing
-        images = convert_from_bytes(file_bytes, dpi=150)
+        # Increase DPI to 200 for better precision (fixes rounding errors)
+        images = convert_from_bytes(file_bytes, dpi=200)
         total_pages = len(images)
         
-        progress_text = f"Scanning {pdf_file.name}..."
-        my_bar = st.progress(0, text=progress_text)
+        my_bar = st.progress(0, text=f"Scanning {pdf_file.name}...")
 
         for i, image in enumerate(images):
-            my_bar.progress(int(((i + 1) / total_pages) * 100), 
-                             text=f"{progress_text} (Page {i+1}/{total_pages})")
+            my_bar.progress(int(((i + 1) / total_pages) * 100))
             
-            # Use 'lang="eng"' to help Tesseract focus
-            text = pytesseract.image_to_string(image, lang="eng")
+            # Use 'psm 6' (Assume a single uniform block of text) 
+            # and whitelist digits for better precision
+            custom_config = r'--oem 3 --psm 6'
+            text = pytesseract.image_to_string(image, lang="eng", config=custom_config)
             
-            # --- Parsing Logic ---
-            # --- IMPROVED Parsing Logic ---
-            
-            # 1. Date: Allow for slightly different separators (dots, dashes, or slashes)
+            # --- 1. SMART DATE SEARCH ---
+            # We look for the date specifically in the top half of the page
             date_match = re.search(r'(\d{2}[./-]\d{2}[./-]\d{4})', text)
             if not date_match:
                 continue
             
-            # Normalize the date string to use dots for strptime
             date_str = date_match.group(1).replace('-', '.').replace('/', '.')
             dt_obj = datetime.strptime(date_str, "%d.%m.%Y")
             
-            # 2. kWh Usage: Look for 'kWh' or 'kVVh' or 'KWH'
-            # We look for the number AFTER the keyword, ignoring extra symbols
+            # --- 2. SMART kWh SEARCH ---
+            # Handles 'kVVh', 'KWH', etc., and looks across lines
             kwh_val = 0.0
-            kwh_pattern = r'(?:Kegunaan|Usage)\s*(?:kWh|kVVh|KWH).*?([\d,]+\.\d{2})'
+            kwh_pattern = r'Kegunaan.*?kWh.*?\s+([\d,]+\.\d{2})'
             kwh_match = re.search(kwh_pattern, text, re.IGNORECASE | re.DOTALL)
             if kwh_match:
                 kwh_val = float(kwh_match.group(1).replace(',', ''))
 
-            # 3. Total RM Cost: Look for 'RM' or 'RN' or 'BM'
-            # TNB bills sometimes have "Jumlah Bil" or "Caj Semasa"
+            # --- 3. SMART RM SEARCH ---
+            # Look specifically for RM/RN followed by the digit
             rm_val = 0.0
-            rm_pattern = r'(?:Jumlah|Caj|Total).*?(?:RM|RN|BM|RIV|RM)\s*([\d,]+\.\d{2})'
-            rm_match = re.search(rm_pattern, text, re.IGNORECASE)
+            # This regex allows for a space or a character between RM and the number
+            rm_pattern = r'(?:Jumlah|Caj|Bil).*?(?:RM|RN|BM|RN|RIV)\s*([\d,]+\.\d{2})'
+            rm_match = re.search(rm_pattern, text, re.IGNORECASE | re.DOTALL)
             if rm_match:
                 rm_val = float(rm_match.group(1).replace(',', ''))
 
@@ -68,13 +65,12 @@ def extract_data_with_ocr(pdf_file):
                     "RM": rm_val
                 })
             
-            # IMPORTANT: Clear the image from memory after processing
             image.close() 
             
         my_bar.empty()
                     
     except Exception as e:
-        st.error(f"⚠️ technical Error: {e}")
+        st.error(f"⚠️ Technical Error: {e}")
                 
     return data_list
 
