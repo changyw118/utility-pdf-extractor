@@ -7,6 +7,7 @@ import gc
 import pytesseract
 from pdf2image import convert_from_bytes
 
+# --- Page Configuration ---
 st.set_page_config(page_title="TNB Precise Extractor", layout="wide")
 
 def clean_industrial_num(raw_str):
@@ -27,8 +28,7 @@ def extract_data_with_ocr(pdf_file):
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
         
-        # Stream pages one by one to save RAM.
-        # 200 DPI balances precision and memory safety.
+        # 200 DPI balances precision and memory safety to prevent crashes.
         images = convert_from_bytes(file_bytes, dpi=200, grayscale=True) 
         total_pages = len(images)
         
@@ -83,3 +83,26 @@ def extract_data_with_ocr(pdf_file):
 
 # --- UI & EXCEL FORMATTING ---
 st.title("⚡ TNB Absolute Precision Extractor")
+# The file_uploader will only appear if the script runs successfully.
+uploaded_files = st.file_uploader("Upload TNB PDFs", type="pdf", accept_multiple_files=True)
+
+if uploaded_files:
+    all_results = []
+    for f in uploaded_files:
+        data = extract_data_with_ocr(f)
+        if data: all_results.extend(data)
+    
+    if all_results:
+        df = pd.DataFrame(all_results).drop_duplicates(subset=['Year', 'Month']).sort_values(['Year', 'Month_Num'])
+        st.subheader("📊 Extracted Summary")
+        st.table(df[['Year', 'Month', 'kWh', 'RM']].style.format({'kWh': "{:,.2f}", 'RM': "{:,.2f}"}))
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df[['Year', 'Month', 'kWh', 'RM']].to_excel(writer, index=False, sheet_name='TNB_Data')
+            workbook, worksheet = writer.book, writer.sheets['TNB_Data']
+            # Precise Industrial Excel formatting.
+            num_format = workbook.add_format({'num_format': '#,##0.00'})
+            worksheet.set_column('C:D', 20, num_format)
+            
+        st.download_button("📥 Download Formatted Excel Report", output.getvalue(), "TNB_Report.xlsx")
