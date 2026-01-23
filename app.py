@@ -11,10 +11,8 @@ from pdf2image import convert_from_bytes
 # ⚙️ CONFIGURATION - UPDATE THESE PATHS
 # ==========================================
 # 1. Update this to your Tesseract EXE location
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # 2. Update this to your Poppler BIN folder location
-POPPLER_PATH = r'C:\poppler-24.08.0\Library\bin' 
 # ==========================================
 
 st.set_page_config(page_title="TNB Smart OCR Extractor", layout="wide")
@@ -34,7 +32,7 @@ def extract_data_with_ocr(pdf_file):
         # Step B: If text is missing or unreadable, use the OCR tools you downloaded
         if "Kegunaan" not in text:
             st.info("🔄 Scanned PDF detected. Running OCR scan...")
-            images = convert_from_bytes(file_bytes, poppler_path=POPPLER_PATH, first_page=1, last_page=1)
+            images = convert_from_bytes(file_bytes, first_page=1, last_page=1)
             if images:
                 text = pytesseract.image_to_string(images[0])
         
