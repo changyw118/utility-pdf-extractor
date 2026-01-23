@@ -7,7 +7,19 @@ import pytesseract
 from pdf2image import convert_from_bytes
 
 # --- Page Config ---
-st.set_page_config(page_title="TNB Industrial Extractor", layout="wide")
+st.set_page_config(page_title="TNB Universal Extractor", layout="wide")
+
+def clean_industrial_num(raw_str):
+    """
+    Strips spaces and commas to prevent 1,364,751.00 from being read as 1,364.75.
+    """
+    if not raw_str: return 0.0
+    # Remove everything except digits and the decimal point
+    clean = "".join(c for c in raw_str if c.isdigit() or c == '.')
+    try:
+        return float(clean)
+    except:
+        return 0.0
 
 def extract_data_with_ocr(pdf_file):
     data_list = []
@@ -15,19 +27,20 @@ def extract_data_with_ocr(pdf_file):
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
         
-        # Lowering DPI to 150 for the initial "Safe Run"
-        images = convert_from_bytes(file_bytes, dpi=150) 
+        # 200 DPI is sharp enough for industrial digits
+        images = convert_from_bytes(file_bytes, dpi=200) 
         total_pages = len(images)
         
-        my_bar = st.progress(0)
+        my_bar = st.progress(0, text=f"Processing {pdf_file.name}...")
 
         for i, image in enumerate(images):
             my_bar.progress(int(((i + 1) / total_pages) * 100))
             
-            # Using basic config to ensure no startup errors
-            text = pytesseract.image_to_string(image, lang="eng")
+            # PSM 6 keeps large numbers on one horizontal line
+            text = pytesseract.image_to_string(image, lang="eng", config='--psm 6')
             
-            # --- 1. DATE SEARCH (Tempoh Bil) ---
+            # --- 1. STRICT DATE SEARCH (Tempoh Bil) ---
+            # Targets the end date of the period for accurate month mapping
             tempoh_pattern = r'Tempoh\s*Bil.*?[\d./-]+\s*-\s*(\d{2}[./-]\d{2}[./-]\d{4})'
             date_match = re.search(tempoh_pattern, text, re.IGNORECASE | re.DOTALL)
             
@@ -38,27 +51,17 @@ def extract_data_with_ocr(pdf_file):
                 date_str = date_match.group(1).replace('-', '.').replace('/', '.')
                 dt_obj = datetime.strptime(date_str, "%d.%m.%Y")
                 
-                # --- 2. kWh EXTRACTION (Large Number Fix) ---
-                kwh_val = 0.0
-                kwh_line_pattern = r'Kegunaan\s*(?:kWh|KWH).*?([\d\s,]+\.\d{2})'
-                kwh_match = re.search(kwh_line_pattern, text, re.IGNORECASE | re.DOTALL)
-                
-                if kwh_match:
-                    raw_val = kwh_match.group(1)
-                    clean_val = "".join(c for c in raw_val if c.isdigit() or c == '.')
-                    if clean_val:
-                        kwh_val = float(clean_val)
+                # --- 2. STRICT kWh SEARCH (Large Number Fix) ---
+                # Anchored to kWh/KWH to ignore "Kegunaan RM"
+                kwh_pattern = r'Kegunaan\s*(?:kWh|KWH|kVVh).*?([\d\s,]+\.\d{2})'
+                kwh_match = re.search(kwh_pattern, text, re.IGNORECASE | re.DOTALL)
+                kwh_val = clean_industrial_num(kwh_match.group(1)) if kwh_match else 0.0
 
-                # --- 3. RM EXTRACTION (Final Total) ---
-                rm_val = 0.0
+                # --- 3. RM SEARCH (Final Total) ---
+                # Picks the last 'Jumlah' on the page to ensure it's the final payable
                 rm_pattern = r'(?:Jumlah|Caj|Total).*?(?:Perlu|Bayar|Bil|Semasa).*?(?:RM|RN|BM)?\s*([\d\s,]+\.\d{2})'
                 rm_matches = list(re.finditer(rm_pattern, text, re.IGNORECASE | re.DOTALL))
-                
-                if rm_matches:
-                    raw_rm = rm_matches[-1].group(1)
-                    clean_rm = "".join(c for c in raw_rm if c.isdigit() or c == '.')
-                    if clean_rm:
-                        rm_val = float(clean_rm)
+                rm_val = clean_industrial_num(rm_matches[-1].group(1)) if rm_matches else 0.0
 
                 if kwh_val > 0 or rm_val > 0:
                     data_list.append({
@@ -69,16 +72,17 @@ def extract_data_with_ocr(pdf_file):
                         "RM": rm_val
                     })
             
+            # CRITICAL: Clear memory after every page
             image.close()
             
         my_bar.empty()
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"⚠️ App Error: {e}")
     return data_list
 
-# --- User Interface ---
+# --- UI ---
 st.title("⚡ TNB Industrial Smart Extractor")
-uploaded_files = st.file_uploader("Upload TNB PDFs", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload TNB PDFs (Supports Large Files)", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
     all_results = []
@@ -88,11 +92,13 @@ if uploaded_files:
             all_results.extend(data)
     
     if all_results:
+        # Organize and display data
         df = pd.DataFrame(all_results).drop_duplicates(subset=['Year', 'Month']).sort_values(['Year', 'Month_Num'])
+        st.subheader("📊 Extracted Summary")
         st.table(df[['Year', 'Month', 'kWh', 'RM']].style.format({'kWh': "{:,.2f}", 'RM': "{:,.2f}"}))
         
-        # Excel Export
+        # Excel Download logic
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False)
-        st.download_button("📥 Download Excel", output.getvalue(), "TNB_Report.xlsx")
+            df.to_excel(writer, index=False, sheet_name='TNB_Data')
+        st.download_button("📥 Download Excel Report", output.getvalue(), "TNB_Report.xlsx")
