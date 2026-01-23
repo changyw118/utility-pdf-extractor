@@ -48,22 +48,22 @@ def extract_data_with_ocr(pdf_file):
                 kwh_val = float(kwh_match.group(1).replace(',', ''))
 
             # --- 3. SMART RM SEARCH ---
-           # --- UPDATED STRICT RM SEARCH ---
+           # --- LASER-FOCUSED RM SEARCH ---
             rm_val = 0.0
             
-            # This 'list' focuses ONLY on the Final Total keywords
-            # It ignores things like "Balance" or "Deposit"
-            strict_rm_keywords = r'(?:Jumlah\s*Perlu\s*Bayar|Jumlah\s*Bil|Caj\s*Semasa)'
+            # This search is much more specific to the TNB "Amount Due" box
+            # It looks for "Jumlah" AND "Bayar" OR "Bil" to ensure it's the TOTAL
+            # It also allows for 'RIV' or 'RN' which are common OCR errors for 'RM'
+            rm_pattern = r'(?:Jumlah|Caj|Total).*?(?:Perlu|Bayar|Bil|Semasa).*?(?:RM|RN|BM|RIV|RM)?\s*([\d,]+\.\d{2})'
             
-            # This pattern looks for the keyword, then the RM symbol, then the number
-            rm_pattern = f'{strict_rm_keywords}.*?(?:RM|RN|BM|RIV)?\s*([\d,]+\.\d{2})'
+            # finditer looks for ALL occurrences; we will pick the most likely one
+            matches = list(re.finditer(rm_pattern, text, re.IGNORECASE | re.DOTALL))
             
-            # We use re.DOTALL in case the number is on the line below the word "RM"
-            rm_match = re.search(rm_pattern, text, re.IGNORECASE | re.DOTALL)
-            
-            if rm_match:
-                # We clean the number (removing commas) so Python treats it as a decimal
-                rm_val = float(rm_match.group(1).replace(',', ''))
+            if matches:
+                # Usually, the Total Amount is the LAST 'Jumlah' mentioned on the page
+                # This helps avoid picking up 'Balance Carried Forward' at the top
+                best_match = matches[-1] 
+                rm_val = float(best_match.group(1).replace(',', ''))
                 
             if kwh_val > 0 or rm_val > 0:
                 data_list.append({
