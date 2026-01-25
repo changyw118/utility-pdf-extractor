@@ -1,6 +1,1 @@
-streamlit
-pandas
-pytesseract
-pdf2image
-pillow
-xlsxwriter
+pip install pdfplumber streamlit pandas xlsxwriter
