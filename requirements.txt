@@ -1,1 +1,4 @@
-pip install pdfplumber streamlit pandas xlsxwriter
+streamlit
+pdfplumber
+pandas
+xlsxwriter
