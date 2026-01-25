@@ -1,173 +1,108 @@
 import streamlit as st
+import pdfplumber
 import pandas as pd
 import re
 from datetime import datetime
 import io
-import gc
-import pytesseract
-from pdf2image import convert_from_bytes
 
-# --------------------------------------------------
-# PAGE CONFIG
-# --------------------------------------------------
 st.set_page_config(
-    page_title="TNB Precise Industrial Extractor",
+    page_title="TNB Single-Page Extractor",
     layout="wide"
 )
 
-# --------------------------------------------------
-# UTILITIES
-# --------------------------------------------------
-def clean_industrial_num(raw):
-    if not raw:
+# -------------------------------
+# Utilities
+# -------------------------------
+def clean_number(s):
+    if not s:
         return 0.0
-    raw = raw.replace(" ", "")
-    raw = "".join(c for c in raw if c.isdigit() or c == ".")
-    if raw.count(".") > 1:
-        parts = raw.split(".")
-        raw = "".join(parts[:-1]) + "." + parts[-1]
+    s = re.sub(r"[^\d.]", "", s)
     try:
-        return float(raw)
+        return float(s)
     except:
         return 0.0
 
 
-def extract_date(text):
-    header = re.search(
-        r'Tarikh\s*Bil(.*?)No\.\s*Invois',
+def extract_from_page(text):
+    # 1) Jumlah Perlu Bayar
+    rm_match = re.search(
+        r"Jumlah\s+Perlu\s+Bayar\s*:\s*RM\s*([\d,]+\.\d{2})",
         text,
-        re.IGNORECASE | re.DOTALL
+        re.IGNORECASE
     )
-    if not header:
-        return None
+    rm = clean_number(rm_match.group(1)) if rm_match else 0.0
 
-    dates = re.findall(
-        r'(\d{2}[./-]\d{2}[./-]\d{4})',
-        header.group(1)
+    # 2) Jumlah kWh (exact line)
+    kwh_match = re.search(
+        r"\bJumlah\b\s+([\d,]+\.\d{2})",
+        text
     )
-    if len(dates) >= 2:
-        raw = dates[1].replace("-", ".").replace("/", ".")
-        if raw.startswith("9"):
-            raw = "3" + raw[1:]
+    kwh = clean_number(kwh_match.group(1)) if kwh_match else 0.0
+
+    # 3) Tempoh Bil start date
+    date_match = re.search(
+        r"Tempoh\s+Bil\s*:?\s*(\d{2}[./]\d{2}[./]\d{4})",
+        text,
+        re.IGNORECASE
+    )
+    dt = None
+    if date_match:
         try:
-            return datetime.strptime(raw, "%d.%m.%Y")
+            dt = datetime.strptime(
+                date_match.group(1).replace("/", "."),
+                "%d.%m.%Y"
+            )
         except:
-            return None
-    return None
+            pass
+
+    return kwh, rm, dt
 
 
-def extract_values(text):
-    kwh = 0.0
-    rm = 0.0
+def extract_pdf(pdf_file):
+    rows = []
 
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
 
-    for i, line in enumerate(lines):
-        if "kwh" in line.lower():
-            kwh = clean_industrial_num(line)
+            kwh, rm, dt = extract_from_page(text)
 
-        if "perlu bayar" in line.lower():
-            rm = clean_industrial_num(line)
+            if dt and (kwh > 0 or rm > 0):
+                rows.append({
+                    "Year": dt.year,
+                    "Month": dt.strftime("%b"),
+                    "Month_Num": dt.month,
+                    "kWh": kwh,
+                    "RM": rm
+                })
 
-    return kwh, rm
-
-
-# --------------------------------------------------
-# OCR PIPELINE (ROBUST VERSION)
-# --------------------------------------------------
-def extract_data_with_ocr(pdf_file):
-    results = []
-    last_valid_date = None
-
-    pdf_file.seek(0)
-    file_bytes = pdf_file.read()
-
-    # count pages safely
-    pages = convert_from_bytes(file_bytes, dpi=50)
-    total_pages = len(pages)
-    del pages
-    gc.collect()
-
-    progress = st.progress(0, text=f"Scanning {pdf_file.name}")
-
-    for page in range(1, total_pages + 1):
-        progress.progress(int(page / total_pages * 100))
-
-        images = convert_from_bytes(
-            file_bytes,
-            dpi=200,
-            first_page=page,
-            last_page=page,
-            grayscale=True
-        )
-
-        image = images[0]
-
-        text_6 = pytesseract.image_to_string(image, config="--psm 6")
-        text_11 = pytesseract.image_to_string(image, config="--psm 11")
-        text = text_6 if len(text_6) > len(text_11) else text_11
-
-        # DATE (carry-forward logic)
-        dt = extract_date(text)
-        if dt:
-            last_valid_date = dt
-        else:
-            dt = last_valid_date
-
-        if not dt or not (2010 <= dt.year <= 2030):
-            image.close()
-            continue
-
-        # VALUES
-        kwh, rm = extract_values(text)
-
-        # SANITY FILTER
-        if kwh > 50_000_000 or rm > 5_000_000:
-            image.close()
-            continue
-
-        if kwh > 0 or rm > 0:
-            results.append({
-                "Year": dt.year,
-                "Month": dt.strftime("%b"),
-                "Month_Num": dt.month,
-                "kWh": kwh,
-                "RM": rm
-            })
-
-        image.close()
-        del image
-        gc.collect()
-
-    progress.empty()
-    return results
+    return rows
 
 
-# --------------------------------------------------
+# -------------------------------
 # UI
-# --------------------------------------------------
-st.title("⚡ TNB Industrial Smart Extractor")
+# -------------------------------
+st.title("⚡ TNB Precise Single-Page Extractor")
 
-uploaded_files = st.file_uploader(
-    "Upload TNB PDFs",
+files = st.file_uploader(
+    "Upload TNB PDF",
     type="pdf",
     accept_multiple_files=True
 )
 
-if uploaded_files:
-    all_data = []
+if files:
+    data = []
+    for f in files:
+        data.extend(extract_pdf(f))
 
-    for f in uploaded_files:
-        all_data.extend(extract_data_with_ocr(f))
-
-    if all_data:
+    if data:
         df = (
-            pd.DataFrame(all_data)
+            pd.DataFrame(data)
             .drop_duplicates(subset=["Year", "Month"])
             .sort_values(["Year", "Month_Num"])
         )
 
-        st.subheader("Extracted Summary")
+        st.subheader("Extracted Data")
         st.table(
             df[["Year", "Month", "kWh", "RM"]]
             .style.format({"kWh": "{:,.2f}", "RM": "{:,.2f}"})
@@ -180,13 +115,9 @@ if uploaded_files:
                 index=False,
                 sheet_name="TNB_Data"
             )
-            workbook = writer.book
-            worksheet = writer.sheets["TNB_Data"]
-            fmt = workbook.add_format({"num_format": "#,##0.00"})
-            worksheet.set_column("C:D", 20, fmt)
 
         st.download_button(
-            "Download Formatted Excel Report",
+            "Download Excel",
             output.getvalue(),
-            "TNB_Precise_Report.xlsx"
+            "TNB_Report.xlsx"
         )
