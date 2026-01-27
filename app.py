@@ -8,8 +8,30 @@ import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image, ImageOps
 
-st.set_page_config(page_title="TNB Industrial Extractor", layout="wide")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="TNB Precise Industrial Extractor", layout="wide")
 
+# --- SIDEBAR SETTINGS ---
+st.sidebar.header("🔧 Environment Settings")
+st.sidebar.info("If running locally on Windows, provide the paths below.")
+
+# Poppler Path (Needed for pdf2image)
+poppler_bin_path = st.sidebar.text_input(
+    "Poppler Bin Path", 
+    placeholder=r"C:\poppler\Library\bin"
+)
+
+# Tesseract Path (Needed for pytesseract)
+tesseract_exe_path = st.sidebar.text_input(
+    "Tesseract EXE Path", 
+    placeholder=r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
+
+# Apply Tesseract path if provided
+if tesseract_exe_path:
+    pytesseract.pytesseract.tesseract_cmd = tesseract_exe_path
+
+# --- HELPER FUNCTIONS ---
 def clean_industrial_num(raw_str):
     if not raw_str: return 0.0
     # Removes spaces and commas, keeps digits and dots
@@ -19,34 +41,36 @@ def clean_industrial_num(raw_str):
     except:
         return 0.0
 
-def extract_data_with_ocr(pdf_file):
+def extract_data_with_ocr(pdf_file, p_path):
     data_list = []
-    current_bill_date = None
+    current_bill_date = None 
     
     try:
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
-        # DPI 150 is the "sweet spot" for speed vs memory on Streamlit Cloud
-        images = convert_from_bytes(file_bytes, dpi=150) 
-        total_pages = len(images)
         
-        progress_text = f"Scanning {pdf_file.name}..."
-        my_bar = st.progress(0, text=progress_text)
+        # Convert PDF to Images
+        # We pass the poppler_path here from the sidebar input
+        pop_param = p_path if p_path else None
+        
+        images = convert_from_bytes(
+            file_bytes, 
+            dpi=150, 
+            grayscale=True, 
+            poppler_path=pop_param
+        )
+        
+        total_pages = len(images)
+        my_bar = st.progress(0, text=f"Scanning {pdf_file.name}...")
 
         for i, image in enumerate(images):
-            my_bar.progress((i + 1) / total_pages, text=f"Processing Page {i+1}/{total_pages}")
+            my_bar.progress((i + 1) / total_pages)
             
-            # --- Image Preprocessing for Better OCR ---
-            image = ImageOps.grayscale(image)
-            # Thresholding helps remove background noise/colors
-            image = image.point(lambda x: 0 if x < 140 else 255, '1') 
+            # Simple Pre-processing
+            image = ImageOps.autocontrast(image)
+            text = pytesseract.image_to_string(image, lang="eng", config='--psm 6')
             
-            # OCR with Whitelist for numbers and key financial terms
-            custom_config = r'--oem 3 --psm 6'
-            text = pytesseract.image_to_string(image, lang="eng", config=custom_config)
-            
-            # --- 1. DATE LOOKUP ---
-            # TNB bills usually have "Tarikh Bil" followed by the date
+            # --- 1. DATE LOOKUP (Search for Tarikh Bil) ---
             header_section = re.search(r'Tarikh\s*Bil(.*?)No\.', text, re.IGNORECASE | re.DOTALL)
             if header_section:
                 dates = re.findall(r'(\d{2}[./-]\d{2}[./-]\d{4})', header_section.group(1))
@@ -58,10 +82,8 @@ def extract_data_with_ocr(pdf_file):
 
             # --- 2. DATA EXTRACTION ---
             if current_bill_date:
-                # Target the Total Consumption (kWh)
+                # Look for kWh and Amount RM
                 kwh_match = re.search(r'(?:Kegunaan|Jumlah)\s*(?:kWh|KWH|kVVh)[\s:]*([\d\s,.]+\d{2})', text, re.IGNORECASE)
-                
-                # Target the Total Payable (RM)
                 rm_match = re.search(r'Jumlah\s+Perlu\s+Bayar[\s:]*RM\s*([\d\s,.]+\d{2})', text, re.IGNORECASE)
                 
                 if kwh_match or rm_match:
@@ -70,54 +92,52 @@ def extract_data_with_ocr(pdf_file):
                     
                     if k_val > 0 or r_val > 0:
                         data_list.append({
-                            "Date": current_bill_date.strftime("%Y-%m-%d"),
+                            "Billing Date": current_bill_date.strftime("%Y-%m-%d"),
                             "Year": current_bill_date.year,
                             "Month": current_bill_date.strftime("%b"),
                             "kWh": k_val,
                             "RM": r_val,
-                            "Source": pdf_file.name
+                            "File": pdf_file.name
                         })
-                        current_bill_date = None # Reset to avoid duplicates on multi-page invoices
+                        current_bill_date = None # Clear date to avoid multi-page duplicates
 
-            # Cleanup memory immediately
+            image.close()
             del image
             gc.collect()
             
         my_bar.empty()
     except Exception as e:
         st.error(f"⚠️ Error processing {pdf_file.name}: {e}")
+        st.info("Tip: Double check your Poppler path in the sidebar.")
     return data_list
 
-# --- UI LAYOUT ---
-st.title("⚡ TNB Industrial PDF Extractor")
-st.markdown("Upload your TNB Electricity Bills (PDF) to extract consumption and cost data.")
+# --- MAIN UI ---
+st.title("⚡ TNB Industrial Bill Extractor")
+st.write("Upload scanned TNB PDFs to extract Billing Date, Usage (kWh), and Total Amount (RM).")
 
-uploaded_files = st.file_uploader("Choose TNB PDF files", type="pdf", accept_multiple_files=True)
+files = st.file_uploader("Upload TNB PDF Bills", type="pdf", accept_multiple_files=True)
 
-if uploaded_files:
-    all_extracted_data = []
-    for uploaded_file in uploaded_files:
-        result = extract_data_with_ocr(uploaded_file)
-        all_extracted_data.extend(result)
+if files:
+    all_data = []
+    for f in files:
+        data = extract_data_with_ocr(f, poppler_bin_path)
+        all_data.extend(data)
     
-    if all_extracted_data:
-        df = pd.DataFrame(all_extracted_data)
+    if all_data:
+        df = pd.DataFrame(all_data)
         
-        st.subheader("Extracted Data")
-        st.info("💡 You can edit the cells below if the OCR misread a number.")
-        edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+        st.subheader("Results")
+        # Editable table for manual corrections
+        edited_df = st.data_editor(df, use_container_width=True)
         
-        # --- EXCEL DOWNLOAD ---
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        # Excel Download Logic
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             edited_df.to_excel(writer, index=False, sheet_name='TNB_Data')
-            writer.close()
-            
+        
         st.download_button(
-            label="📥 Download Data as Excel",
-            data=buffer.getvalue(),
-            file_name=f"TNB_Extraction_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            label="📊 Export to Excel",
+            data=output.getvalue(),
+            file_name=f"TNB_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    else:
-        st.warning("No data found. Please ensure the PDF is a clear TNB bill.")
