@@ -8,19 +8,37 @@ import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image, ImageOps
 import os
+import platform
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="TNB Precise Industrial Extractor", layout="wide")
 
-# --- SIDEBAR SETUP ---
-st.sidebar.header("🔧 Windows Configuration")
+# --- SMART PATH CONFIGURATION ---
+def setup_paths():
+    # Detect if we are on Windows or Linux (Cloud)
+    is_windows = platform.system() == "Windows"
+    
+    if is_windows:
+        st.sidebar.header("🔧 Windows Configuration")
+        # You can change these defaults to your local paths
+        default_pop = r"C:\poppler\Library\bin"
+        default_tess = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        
+        p_path = st.sidebar.text_input("Poppler Bin Path", value=default_pop)
+        t_path = st.sidebar.text_input("Tesseract EXE Path", value=default_tess)
+        
+        if os.path.exists(t_path):
+            pytesseract.pytesseract.tesseract_cmd = t_path
+    else:
+        # Linux (Streamlit Cloud) configuration
+        # On Linux, these are usually in the system PATH automatically
+        p_path = None 
+        t_path = "tesseract" 
+        # No need to set pytesseract.tesseract_cmd on Linux if installed via packages.txt
+        
+    return p_path, t_path
 
-# Set these default paths to match your current setup
-default_poppler = r"C:\poppler\Library\bin"
-default_tesseract = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
-poppler_path = st.sidebar.text_input("Poppler Bin Path", value=default_poppler)
-tesseract_exe = st.sidebar.text_input("Tesseract EXE Path", value=default_tesseract)
+poppler_path, tesseract_path = setup_paths()
 
 # --- HELPER FUNCTIONS ---
 def clean_num(raw_str):
@@ -31,37 +49,22 @@ def clean_num(raw_str):
     except:
         return 0.0
 
-def process_bill(pdf_file, p_path, t_path):
+def process_bill(pdf_file, p_path):
     data_list = []
     
-    # 1. Setup Tesseract Path
-    if os.path.exists(t_path):
-        pytesseract.pytesseract.tesseract_cmd = t_path
-    else:
-        st.error(f"❌ Tesseract not found at: {t_path}")
-        return None
-
-    # 2. Main Processing Block
     try:
         pdf_file.seek(0)
         file_bytes = pdf_file.read()
         
         # Convert PDF to Images
-        # We wrap this in another try to catch Poppler-specific path errors
-        try:
-            images = convert_from_bytes(
-                file_bytes, 
-                dpi=150, 
-                poppler_path=p_path if p_path else None
-            )
-        except Exception as pe:
-            st.error(f"❌ Poppler Error: {pe}")
-            st.info(f"Check if pdfinfo.exe exists in: {p_path}")
-            return None
+        images = convert_from_bytes(
+            file_bytes, 
+            dpi=150, 
+            poppler_path=p_path if p_path and os.path.exists(p_path) else None
+        )
 
         st.success(f"✅ Successfully loaded {len(images)} pages!")
         
-        # 3. OCR Scan
         progress_bar = st.progress(0)
         for i, img in enumerate(images):
             progress_bar.progress((i + 1) / len(images), text=f"Scanning Page {i+1}...")
@@ -70,12 +73,12 @@ def process_bill(pdf_file, p_path, t_path):
             img = ImageOps.grayscale(img)
             text = pytesseract.image_to_string(img, lang="eng")
             
-            # 4. Regex Extraction (Searching for Date, kWh, and RM)
+            # --- EXTRACTION LOGIC ---
             date_match = re.search(r'(\d{2}[./-]\d{2}[./-]\d{4})', text)
             kwh_match = re.search(r'(?:kWh|KWH|kVVh)[\s:]*([\d\s,.]+\d{2})', text, re.IGNORECASE)
             rm_match = re.search(r'Jumlah\s+Perlu\s+Bayar[\s:]*RM\s*([\d\s,.]+\d{2})', text, re.IGNORECASE)
 
-            if date_match and (kwh_match or rm_match):
+            if date_match:
                 data_list.append({
                     "Billing Date": date_match.group(1),
                     "kWh Usage": clean_num(kwh_match.group(1)) if kwh_match else 0.0,
@@ -83,7 +86,6 @@ def process_bill(pdf_file, p_path, t_path):
                     "Source Page": i + 1
                 })
             
-            # Memory Cleanup
             del img
             gc.collect()
 
@@ -91,7 +93,7 @@ def process_bill(pdf_file, p_path, t_path):
         return data_list
 
     except Exception as e:
-        st.error(f"❌ Critical Error: {str(e)}")
+        st.error(f"❌ Processing Error: {str(e)}")
         return None
 
 # --- UI LAYOUT ---
@@ -104,14 +106,13 @@ if uploaded_files:
     if st.button("🚀 Start Extraction"):
         all_results = []
         for f in uploaded_files:
-            res = process_bill(f, poppler_path, tesseract_exe)
+            res = process_bill(f, poppler_path)
             if res:
                 all_results.extend(res)
         
         if all_results:
             df = pd.DataFrame(all_results)
             st.subheader("📊 Extracted Data")
-            # Editable table for manual correction
             edited_df = st.data_editor(df, use_container_width=True)
             
             # Excel Download
@@ -126,4 +127,4 @@ if uploaded_files:
                 mime="application/vnd.ms-excel"
             )
         else:
-            st.warning("No valid data found in the uploaded bills.")
+            st.warning("No valid data found. Check if the OCR can read the text clearly.")
