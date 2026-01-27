@@ -32,7 +32,13 @@ def extract_data_with_ocr(pdf_file):
         file_bytes = pdf_file.read()
         
         # This is where Poppler is used
-        images = convert_from_bytes(file_bytes, dpi=150, poppler_path=p_path)
+        # The 'r' before the quote is the secret sauce for Windows paths!
+images = convert_from_bytes(
+    file_bytes, 
+    dpi=150, 
+    poppler_path=r'C:\poppler-25.12.0\Library\bin'
+)
+
         
         my_bar = st.progress(0, text="Reading PDF pages...")
         for i, image in enumerate(images):
