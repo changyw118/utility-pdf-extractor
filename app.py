@@ -41,6 +41,7 @@ def extract_data_from_text(text):
     data = None
     dt_obj = None
     
+    # Date extraction logic
     tempoh_match = re.search(r'Tempoh\s*Bil\s*:\s*.*?\s*(\d{2}[./-]\d{2}[./-]\d{4})', text, re.IGNORECASE)
     if tempoh_match:
         raw_date = tempoh_match.group(1).replace('-', '.').replace('/', '.')
@@ -90,11 +91,9 @@ def extract_data_from_text(text):
         if kwh_val or rm_val:
             data = {
                 "Year": dt_obj.year,
-                "Month": dt_obj.strftime("%b"),
                 "Month_Num": dt_obj.month,
                 "kWh": kwh_val,
-                "RM": rm_val,
-                "Status": "Found"
+                "RM": rm_val
             }
     return data
 
@@ -138,7 +137,7 @@ def process_pdf(pdf_file):
 
 # --- UI Layout ---
 st.title("⚡ TNB Industrial Smart Extractor Pro")
-st.markdown("Automated utility data extraction organized by Year and Month.")
+st.markdown("Extract and organize bill data by Year and Month into formatted Excel tables.")
 
 uploaded_files = st.file_uploader("📤 Upload TNB Industrial Bills (PDF)", type="pdf", accept_multiple_files=True)
 
@@ -150,62 +149,68 @@ if uploaded_files:
             if data: all_results.extend(data)
     
     if all_results:
+        # 1. Create Base DataFrame
         df_raw = pd.DataFrame(all_results)
-        df = df_raw.groupby(['Year', 'Month_Num']).agg({
-            'Month': 'first', 'kWh': 'max', 'RM': 'max', 'Status': 'first'
-        }).reset_index()
+        
+        # 2. Ensure all months 1-12 are represented for each year found
+        years = sorted(df_raw['Year'].unique())
+        months = list(range(1, 13))
+        
+        # Create a template of Year/Month combinations
+        template = pd.DataFrame([(y, m) for y in years for m in months], columns=['Year', 'Month_Num'])
+        
+        # Merge extracted data into the template
+        df_merged = pd.merge(template, df_raw, on=['Year', 'Month_Num'], how='left')
+        
+        # Helper for Month Names
+        month_names = {1:'Jan', 2:'Feb', 3:'Mar', 4:'Apr', 5:'May', 6:'June', 
+                       7:'July', 8:'Aug', 9:'Sep', 10:'Oct', 11:'Nov', 12:'Dec'}
 
-        # UI Summary Metrics
-        st.divider()
-        st.subheader("📊 Extracted Summary")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total kWh (Detected)", f"{df['kWh'].sum():,.2f}")
-        c2.metric("Total RM (Detected)", f"RM {df['RM'].sum():,.2f}")
-        c3.metric("Months Processed", len(df))
-
-        # --- EXCEL EXPORT LOGIC (Pivoted Format) ---
+        # --- EXCEL EXPORT LOGIC ---
         output = io.BytesIO()
-        try:
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Helper dictionary for month sorting/naming
-                month_map = {1:'Jan', 2:'Feb', 3:'Mar', 4:'Apr', 5:'May', 6:'June', 
-                             7:'July', 8:'Aug', 9:'Sep', 10:'Oct', 11:'Nov', 12:'Dec'}
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            
+            # --- Table 1: kWh Consumption ---
+            kwh_pivot = df_merged.pivot(index='Month_Num', columns='Year', values='kWh')
+            kwh_pivot.index = kwh_pivot.index.map(month_names)
+            # Add Total Row
+            kwh_pivot.loc['Total kWh per year'] = kwh_pivot.sum()
+            kwh_pivot.to_excel(writer, sheet_name='Consumption_kWh')
+
+            # --- Table 2: RM Cost ---
+            rm_pivot = df_merged.pivot(index='Month_Num', columns='Year', values='RM')
+            rm_pivot.index = rm_pivot.index.map(month_names)
+            # Add Total Row
+            rm_pivot.loc['Total Cost (RM) per year'] = rm_pivot.sum()
+            rm_pivot.to_excel(writer, sheet_name='Cost_RM')
+
+            # --- Styling ---
+            workbook = writer.book
+            num_format = workbook.add_format({'num_format': '#,##0.00', 'border': 1})
+            header_format = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1, 'align': 'center'})
+            
+            for sheet_name in ['Consumption_kWh', 'Cost_RM']:
+                worksheet = writer.sheets[sheet_name]
+                # Format headers
+                for col_num, value in enumerate(kwh_pivot.columns.values):
+                    worksheet.write(0, col_num + 1, value, header_format)
+                worksheet.write(0, 0, "Month/Year", header_format)
                 
-                # 1. Prepare kWh Pivot
-                kwh_pivot = df.pivot(index='Month_Num', columns='Year', values='kWh')
-                kwh_pivot.index = kwh_pivot.index.map(month_map)
-                kwh_pivot.loc['Total kWh per year'] = kwh_pivot.sum()
-                kwh_pivot.to_excel(writer, sheet_name='Consumption_kWh')
+                # Format data and columns
+                worksheet.set_column(1, len(years), 18, num_format)
+                worksheet.set_column(0, 0, 25, header_format)
 
-                # 2. Prepare RM Pivot
-                rm_pivot = df.pivot(index='Month_Num', columns='Year', values='RM')
-                rm_pivot.index = rm_pivot.index.map(month_map)
-                rm_pivot.loc['Total Cost (RM) per year'] = rm_pivot.sum()
-                rm_pivot.to_excel(writer, sheet_name='Cost_RM')
+        st.success("Analysis Complete!")
+        st.download_button(
+            label="📥 Download Full Year-on-Year Report",
+            data=output.getvalue(),
+            file_name=f"TNB_Full_Report_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        # Preview in Streamlit
+        st.subheader("Preview (Current Year)")
+        st.write(df_merged[df_merged['Year'] == max(years)].sort_values('Month_Num'))
 
-                # --- Formatting ---
-                workbook = writer.book
-                num_fmt = workbook.add_format({'num_format': '#,##0.00', 'border': 1})
-                head_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1})
-
-                for sheet in ['Consumption_kWh', 'Cost_RM']:
-                    ws = writer.sheets[sheet]
-                    ws.set_column(1, 10, 18, num_fmt)
-                    ws.set_column(0, 0, 25, head_fmt)
-
-            st.success("Analysis Complete! Your report is ready.")
-            st.download_button(
-                label="📥 Download Year-on-Year Excel Report",
-                data=output.getvalue(),
-                file_name=f"TNB_Data_Export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        except Exception as e:
-            st.error(f"Error creating Excel: {e}")
-
-        # Display simple preview table in UI
-        st.table(df.sort_values(['Year', 'Month_Num'], ascending=False).head(10))
 else:
-    st.info("💡 Tip: Upload multiple files to compare year-on-year data.")
-
-st.caption("v2.3 - Pivot Export Version")
+    st.info("Please upload PDF files to begin extraction.")
