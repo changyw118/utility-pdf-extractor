@@ -14,17 +14,35 @@ st.set_page_config(page_title="TNB Precise Industrial Extractor Pro", layout="wi
 # --- Design Tokens (Aesthetics) ---
 st.markdown("""
 <style>
-    .main { background-color: #f8f9fa; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    h1 { color: #1E3A8A; font-family: 'Inter', sans-serif; font-weight: 800; }
+    .main {
+        background-color: #f8f9fa;
+    }
+    .stMetric {
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .stTable {
+        background-color: #ffffff;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+    h1 {
+        color: #1E3A8A;
+        font-family: 'Inter', sans-serif;
+        font-weight: 800;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 def clean_industrial_num(raw_str):
+    """Safely extracts the first valid number from a string."""
     if not raw_str: return None
     match = re.search(r'[\d,.]*\d+\.\d{2}', raw_str)
     if not match:
         match = re.search(r'[\d,.]+', raw_str)
+        
     if match:
         clean = "".join(c for c in match.group(0) if c.isdigit() or c == '.')
         if clean.count('.') > 1:
@@ -38,10 +56,10 @@ def clean_industrial_num(raw_str):
     return None
 
 def extract_data_from_text(text):
+    """Core logic to extract Year, Month, kWh, and RM from raw text."""
     data = None
     dt_obj = None
     
-    # Date extraction logic
     tempoh_match = re.search(r'Tempoh\s*Bil\s*:\s*.*?\s*(\d{2}[./-]\d{2}[./-]\d{4})', text, re.IGNORECASE)
     if tempoh_match:
         raw_date = tempoh_match.group(1).replace('-', '.').replace('/', '.')
@@ -87,13 +105,19 @@ def extract_data_from_text(text):
             old_rm_match = re.search(r'Jumlah\s*Perlu\s*Bayar.*?([\d\s,.]+\d{2})', text, re.IGNORECASE | re.DOTALL)
             if old_rm_match:
                 rm_val = clean_industrial_num(old_rm_match.group(1))
+            else:
+                backup = list(re.finditer(r'(?:Jumlah|Total|Caj).*?([\d\s,.]+\d{2})', text, re.IGNORECASE | re.DOTALL))
+                if backup:
+                    rm_val = clean_industrial_num(backup[-1].group(1))
 
         if kwh_val or rm_val:
             data = {
                 "Year": dt_obj.year,
+                "Month": dt_obj.strftime("%b"),
                 "Month_Num": dt_obj.month,
                 "kWh": kwh_val,
-                "RM": rm_val
+                "RM": rm_val,
+                "Status": "Found"
             }
     return data
 
@@ -115,10 +139,11 @@ def process_pdf(pdf_file):
                 
                 if not page_data:
                     pdf_file.seek(0)
-                    images = convert_from_bytes(pdf_file.read(), first_page=i+1, last_page=i+1, dpi=200)
+                    images = convert_from_bytes(pdf_file.read(), first_page=i+1, last_page=i+1, dpi=200, grayscale=True)
                     if images:
-                        ocr_text = pytesseract.image_to_string(images[0])
+                        ocr_text = pytesseract.image_to_string(images[0], lang="eng", config='--psm 6')
                         page_data = extract_data_from_text(ocr_text)
+                        images[0].close()
                         del images
                 
                 if page_data:
@@ -128,6 +153,7 @@ def process_pdf(pdf_file):
                     else:
                         if page_data['kWh']: data_map[key]['kWh'] = page_data['kWh']
                         if page_data['RM']: data_map[key]['RM'] = page_data['RM']
+                        data_map[key]['Status'] = "Found"
                 
                 if i % 10 == 0: gc.collect()
             my_bar.empty()
@@ -137,7 +163,7 @@ def process_pdf(pdf_file):
 
 # --- UI Layout ---
 st.title("⚡ TNB Industrial Smart Extractor Pro")
-st.markdown("Extract and organize bill data by Year and Month into formatted Excel tables.")
+st.markdown("Automated utility data extraction. Missing values are left blank for manual entry.")
 
 uploaded_files = st.file_uploader("📤 Upload TNB Industrial Bills (PDF)", type="pdf", accept_multiple_files=True)
 
@@ -149,68 +175,77 @@ if uploaded_files:
             if data: all_results.extend(data)
     
     if all_results:
-        # 1. Create Base DataFrame
         df_raw = pd.DataFrame(all_results)
+        df = df_raw.groupby(['Year', 'Month_Num']).agg({
+            'Month': 'first', 'kWh': 'max', 'RM': 'max', 'Status': 'first'
+        }).reset_index()
         
-        # 2. Ensure all months 1-12 are represented for each year found
-        years = sorted(df_raw['Year'].unique())
-        months = list(range(1, 13))
+        df['date'] = pd.to_datetime(df.apply(lambda x: f"{int(x['Year'])}-{int(x['Month_Num'])}-01", axis=1))
+        min_date, max_date = df['date'].min(), df['date'].max()
         
-        # Create a template of Year/Month combinations
-        template = pd.DataFrame([(y, m) for y in years for m in months], columns=['Year', 'Month_Num'])
+        if not pd.isna(min_date):
+            all_months = pd.date_range(start=min_date, end=max_date, freq='MS')
+            df = pd.merge(pd.DataFrame({'date': all_months}), df, on='date', how='left')
+            df['Year'] = df['date'].dt.year
+            df['Month'] = df['date'].dt.strftime('%b')
+            df['Month_Num'] = df['date'].dt.month
+            df['Status'] = df['Status'].fillna('MISSING')
         
-        # Merge extracted data into the template
-        df_merged = pd.merge(template, df_raw, on=['Year', 'Month_Num'], how='left')
+        # Initialize Production Data as empty (None)
+        df['Production Data'] = None
+        df = df.sort_values(['Year', 'Month_Num']).drop(columns=['date'])
         
-        # Helper for Month Names
-        month_names = {1:'Jan', 2:'Feb', 3:'Mar', 4:'Apr', 5:'May', 6:'June', 
-                       7:'July', 8:'Aug', 9:'Sep', 10:'Oct', 11:'Nov', 12:'Dec'}
+        st.divider()
+        st.subheader("📊 Extracted Summary")
+        
+        found_df = df[df['Status'] == 'Found']
+        total_kwh = found_df['kWh'].sum()
+        total_rm = found_df['RM'].sum()
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total kWh (Detected)", f"{total_kwh:,.2f}" if total_kwh > 0 else "-")
+        c2.metric("Total RM (Detected)", f"RM {total_rm:,.2f}" if total_rm > 0 else "-")
+        c3.metric("Status", f"{len(found_df)} Months Found")
 
-        # --- EXCEL EXPORT LOGIC ---
+        def highlight_missing(row):
+            if row['Status'] == 'MISSING':
+                return ['background-color: #ffebee; color: #c62828'] * len(row)
+            return [''] * len(row)
+
+        # UI Table: Replace NaN with empty string for display
+        st.table(df[['Year', 'Month', 'kWh', 'RM', 'Production Data', 'Status']].fillna('').style.format({
+            'kWh': lambda x: f"{x:,.2f}" if isinstance(x, float) else "",
+            'RM': lambda x: f"{x:,.2f}" if isinstance(x, float) else "",
+            'Production Data': lambda x: f"{x:,.2f}" if isinstance(x, float) else ""
+        }).apply(highlight_missing, axis=1))
+        
+        # Excel Export logic
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            export_cols = ['Year', 'Month', 'kWh', 'RM', 'Production Data', 'Status']
+            df[export_cols].to_excel(writer, index=False, sheet_name='TNB_Data')
             
-            # --- Table 1: kWh Consumption ---
-            kwh_pivot = df_merged.pivot(index='Month_Num', columns='Year', values='kWh')
-            kwh_pivot.index = kwh_pivot.index.map(month_names)
-            # Add Total Row
-            kwh_pivot.loc['Total kWh per year'] = kwh_pivot.sum()
-            kwh_pivot.to_excel(writer, sheet_name='Consumption_kWh')
-
-            # --- Table 2: RM Cost ---
-            rm_pivot = df_merged.pivot(index='Month_Num', columns='Year', values='RM')
-            rm_pivot.index = rm_pivot.index.map(month_names)
-            # Add Total Row
-            rm_pivot.loc['Total Cost (RM) per year'] = rm_pivot.sum()
-            rm_pivot.to_excel(writer, sheet_name='Cost_RM')
-
-            # --- Styling ---
             workbook = writer.book
-            num_format = workbook.add_format({'num_format': '#,##0.00', 'border': 1})
-            header_format = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1, 'align': 'center'})
+            worksheet = writer.sheets['TNB_Data']
+            num_format = workbook.add_format({'num_format': '#,##0.00'})
+            missing_format = workbook.add_format({'bg_color': '#FFC7CE'})
+            header_highlight = workbook.add_format({'bg_color': '#D9EAD3', 'bold': True, 'border': 1})
             
-            for sheet_name in ['Consumption_kWh', 'Cost_RM']:
-                worksheet = writer.sheets[sheet_name]
-                # Format headers
-                for col_num, value in enumerate(kwh_pivot.columns.values):
-                    worksheet.write(0, col_num + 1, value, header_format)
-                worksheet.write(0, 0, "Month/Year", header_format)
-                
-                # Format data and columns
-                worksheet.set_column(1, len(years), 18, num_format)
-                worksheet.set_column(0, 0, 25, header_format)
-
-        st.success("Analysis Complete!")
+            worksheet.set_column('C:E', 18, num_format)
+            worksheet.set_column('F:F', 15)
+            worksheet.write('E1', 'Production Data', header_highlight)
+            
+            for i, row in df.iterrows():
+                if row['Status'] == 'MISSING':
+                    worksheet.set_row(i + 1, None, missing_format)
+            
         st.download_button(
-            label="📥 Download Full Year-on-Year Report",
+            label="📥 Download Formatted Excel Report",
             data=output.getvalue(),
-            file_name=f"TNB_Full_Report_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            file_name=f"TNB_Data_Export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        
-        # Preview in Streamlit
-        st.subheader("Preview (Current Year)")
-        st.write(df_merged[df_merged['Year'] == max(years)].sort_values('Month_Num'))
-
 else:
-    st.info("Please upload PDF files to begin extraction.")
+    st.info("💡 Tip: Upload multiple files to merge data into a single timeline.")
+
+st.caption("v2.2 - Clean layout: Missing data left blank for manual input.")
